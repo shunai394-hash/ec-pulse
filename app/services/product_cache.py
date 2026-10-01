@@ -6,16 +6,14 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
 import psycopg
+from app.services.db import connect_kwargs, database_url
 
 from app.services.product_parser import fetch_product
 from app.services.url_safety import validate_public_url
 
 
 def _db_url() -> str:
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL is not configured")
-    return url
+    return database_url()
 
 
 def _init(conn):
@@ -56,7 +54,7 @@ def _ensure_initialized() -> None:
     with _init_lock:
         if _initialized:
             return
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             _init(conn)
         _initialized = True
 
@@ -118,7 +116,7 @@ async def fetch_product_cached(url: str, ttl_seconds: int = 300) -> tuple[dict, 
     cache_key = _key(url)
     _ensure_initialized()
 
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         row = conn.execute(
             "SELECT payload FROM product_cache WHERE cache_key = %s AND expires_at > %s",
             (cache_key, now),
@@ -130,7 +128,7 @@ async def fetch_product_cached(url: str, ttl_seconds: int = 300) -> tuple[dict, 
     # open while the external product page is being fetched.
     lock_token = sha256(f"{cache_key}:{datetime.now(timezone.utc).timestamp()}".encode()).hexdigest()
     lease_until = datetime.now(timezone.utc) + timedelta(seconds=300)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         claimed = conn.execute(
             """
             INSERT INTO product_cache_locks (cache_key, lock_token, locked_until)
@@ -147,7 +145,7 @@ async def fetch_product_cached(url: str, ttl_seconds: int = 300) -> tuple[dict, 
     if not claimed:
         for _ in range(150):
             await asyncio.sleep(0.2)
-            with psycopg.connect(_db_url()) as conn:
+            with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
                 row = conn.execute(
                     "SELECT payload FROM product_cache WHERE cache_key = %s AND expires_at > %s",
                     (cache_key, datetime.now(timezone.utc)),
@@ -157,7 +155,7 @@ async def fetch_product_cached(url: str, ttl_seconds: int = 300) -> tuple[dict, 
         raise TimeoutError("Timed out waiting for product cache refresh")
 
     try:
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             row = conn.execute(
                 "SELECT payload FROM product_cache WHERE cache_key = %s AND expires_at > %s",
                 (cache_key, datetime.now(timezone.utc)),
@@ -168,7 +166,7 @@ async def fetch_product_cached(url: str, ttl_seconds: int = 300) -> tuple[dict, 
         payload = await fetch_product(url)
         captured_at = datetime.now(timezone.utc)
         expires_at = captured_at + timedelta(seconds=ttl_seconds)
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             _write_cached_payload(
                 conn,
                 cache_key,
@@ -181,7 +179,7 @@ async def fetch_product_cached(url: str, ttl_seconds: int = 300) -> tuple[dict, 
             conn.commit()
         return payload, False
     finally:
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             conn.execute(
                 "DELETE FROM product_cache_locks WHERE cache_key = %s AND lock_token = %s",
                 (cache_key, lock_token),

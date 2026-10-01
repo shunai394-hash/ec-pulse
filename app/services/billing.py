@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+from app.services.db import connect_kwargs
 import stripe
 
 from app.services.monitor_store import _account_hash, _db_url
@@ -165,7 +166,7 @@ def process_webhook(payload: bytes, signature: str) -> dict:
     event_id = event_data["id"]
     event_type = event_data["type"]
     now = datetime.now(timezone.utc)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init_billing(conn)
         inserted = conn.execute("""INSERT INTO billing_events (event_id,event_type,created_at,processed_at,payload)
             VALUES (%s,%s,%s,%s,%s) ON CONFLICT (event_id) DO NOTHING RETURNING event_id""",
@@ -270,7 +271,7 @@ def cancel_subscription(api_key: str, at_period_end: bool = True) -> dict:
     from app.services.monitor_store import _account_hash
 
     key_hash = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init_billing(conn)
         row = conn.execute(
             """SELECT stripe_customer_id, stripe_subscription_id, subscription_status,
@@ -323,7 +324,7 @@ def create_customer_portal(api_key: str) -> str:
     if not base_url:
         raise RuntimeError("APP_BASE_URL is not configured")
     from app.services.monitor_store import _account_hash
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init_billing(conn)
         row = conn.execute(
             """SELECT a.stripe_customer_id
@@ -350,7 +351,7 @@ def create_checkout(api_key: str, plan: str) -> str:
     if not price_id or not base_url:
         raise RuntimeError("Stripe price and APP_BASE_URL are not configured")
     from app.services.monitor_store import _account_hash
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init_billing(conn)
         key_hash = _account_hash(api_key)
         row = conn.execute(
@@ -409,7 +410,7 @@ def create_checkout(api_key: str, plan: str) -> str:
         session_id = session.get("id") if hasattr(session, "get") else getattr(session, "id", None)
         if not session_id:
             raise RuntimeError("Stripe checkout did not return a session id")
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             _init_billing(conn)
             conn.execute(
                 "UPDATE api_accounts SET checkout_session_id=%s, updated_at=%s WHERE api_key_hash=%s AND checkout_pending_key=%s",
@@ -422,7 +423,7 @@ def create_checkout(api_key: str, plan: str) -> str:
                 _stripe().checkout.Session.expire(session_id)
         except Exception:
             pass
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             _init_billing(conn)
             conn.execute(
                 "UPDATE api_accounts SET checkout_pending_key=NULL, checkout_pending_until=NULL, checkout_session_id=NULL, updated_at=%s WHERE api_key_hash=%s AND checkout_pending_key=%s",

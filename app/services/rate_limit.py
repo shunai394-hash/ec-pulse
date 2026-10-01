@@ -2,16 +2,14 @@ import os
 from datetime import datetime, timezone
 
 import psycopg
+from app.services.db import connect_kwargs, database_url
 
 _WINDOWS = {"free": 60, "pro": 60, "business": 60}
 _LIMITS = {"free": 30, "pro": 300, "business": 3000}
 
 
 def _db_url() -> str:
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL is not configured")
-    return url
+    return database_url()
 
 
 def check_rate_limit(api_key_hash: str, plan: str) -> dict:
@@ -19,7 +17,7 @@ def check_rate_limit(api_key_hash: str, plan: str) -> dict:
     window = _WINDOWS.get(plan, 60)
     limit = _LIMITS.get(plan, 30)
 
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         now = datetime.now(timezone.utc)
         current_window = now.replace(second=0, microsecond=0)
         row = conn.execute(

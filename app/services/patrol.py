@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import httpx
 import psycopg
+from app.services.db import connect_kwargs
 
 from app.services.product_search import search_products
 from app.services.monitor_store import run_due_monitors, _db_url
@@ -11,7 +12,7 @@ from app.services.patrol_ai import diagnose
 
 
 def _store_report(report: dict) -> None:
-    with psycopg.connect(_db_url(), connect_timeout=3) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs(), connect_timeout=3) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS patrol_reports (
                 id BIGSERIAL PRIMARY KEY,
@@ -44,7 +45,7 @@ async def run_patrol() -> dict:
     checks = []
     repairs = []
     try:
-        with psycopg.connect(_db_url(), connect_timeout=3) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs(), connect_timeout=3) as conn:
             conn.execute("SELECT 1")
         checks.append({"name": "database", "ok": True})
     except Exception as exc:

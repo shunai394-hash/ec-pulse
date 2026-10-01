@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 import psycopg
+from app.services.db import connect_kwargs, database_url
 
 from app.services.url_safety import read_response_bytes, safe_async_client, validate_public_url
 
@@ -131,10 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_research_pains_run_count ON research_pain_points 
 """
 
 def _db_url() -> str:
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL is not configured")
-    return url
+    return database_url()
 
 def _account_hash(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()
@@ -165,7 +163,7 @@ def _init(conn):
 
 def validate_api_key(api_key: str) -> bool:
     key_hash = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         row = conn.execute("SELECT active FROM api_keys WHERE api_key_hash = %s", (key_hash,)).fetchone()
         if not row or not row[0]: return False
@@ -176,7 +174,7 @@ def validate_api_key(api_key: str) -> bool:
 
 def ensure_api_account(api_key: str) -> dict:
     key_hash = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         row = conn.execute(
             """SELECT a.plan, a.credits_balance, a.created_at, a.updated_at
@@ -193,7 +191,7 @@ def create_api_key(plan: str = "free", credits: int = 100) -> dict:
     if credits < 0: raise ValueError("credits must be non-negative")
     raw_key = f"ecp_live_{secrets.token_urlsafe(32)}"
     key_hash = _account_hash(raw_key); now = datetime.now(timezone.utc)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         conn.execute("INSERT INTO api_accounts (api_key_hash, plan, credits_balance, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)", (key_hash, plan, credits, now, now))
         conn.execute("INSERT INTO api_keys (api_key_hash, key_prefix, account_key_hash, active, created_at) VALUES (%s, %s, %s, TRUE, %s)", (key_hash, raw_key[:12], key_hash, now))
@@ -208,7 +206,7 @@ def provision_customer_api_key(user_id: str, rotate: bool = False) -> dict:
     raw_key = f"ecp_live_{secrets.token_urlsafe(32)}"
     key_hash = _account_hash(raw_key)
     now = datetime.now(timezone.utc)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         # Serialize provisioning/rotation for the same authenticated customer.
         # This closes the first-login race where two requests could both observe
@@ -247,7 +245,7 @@ def list_customer_api_keys(user_id: str) -> list[dict]:
     user_id = user_id.strip()
     if not user_id or len(user_id) > 255:
         raise ValueError("Invalid customer user id")
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         rows = conn.execute(
             """SELECT k.key_prefix, k.active, k.created_at, k.last_used_at,
@@ -278,7 +276,7 @@ def revoke_customer_api_key(user_id: str, key_prefix: str) -> bool:
         raise ValueError("Invalid customer user id")
     if not key_prefix or len(key_prefix) > 32:
         raise ValueError("Invalid API key prefix")
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         cur = conn.execute(
             """UPDATE api_keys k
@@ -295,7 +293,7 @@ def revoke_customer_api_key(user_id: str, key_prefix: str) -> bool:
 
 
 def list_api_keys() -> list[dict]:
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         rows = conn.execute("""SELECT k.key_prefix, k.active, k.created_at, k.last_used_at, a.plan, a.credits_balance
             FROM api_keys k JOIN api_accounts a ON a.api_key_hash = k.account_key_hash ORDER BY k.created_at DESC""").fetchall()
@@ -303,13 +301,13 @@ def list_api_keys() -> list[dict]:
 
 def revoke_api_key(api_key: str) -> bool:
     key_hash = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn); cur = conn.execute("UPDATE api_keys SET active = FALSE WHERE api_key_hash = %s", (key_hash,)); conn.commit(); return cur.rowcount > 0
 
 def consume_credit(api_key: str, endpoint: str, credits: int = 1) -> dict:
     if credits < 1: raise ValueError("credits must be positive")
     key_hash = _account_hash(api_key); now = datetime.now(timezone.utc)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         row = conn.execute("""SELECT a.api_key_hash, a.credits_balance FROM api_accounts a JOIN api_keys k ON k.account_key_hash = a.api_key_hash
             WHERE k.api_key_hash = %s AND k.active = TRUE FOR UPDATE OF k, a""", (key_hash,)).fetchone()
@@ -324,7 +322,7 @@ def consume_credit(api_key: str, endpoint: str, credits: int = 1) -> dict:
 
 def get_account_usage(api_key: str) -> dict:
     key_hash = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         account = conn.execute(
             """SELECT a.plan, a.credits_balance, a.created_at, a.updated_at
@@ -381,7 +379,7 @@ def get_customer_usage(user_id: str, days: int = 30) -> dict:
     days = max(1, min(days, 365))
     if not user_id or len(user_id) > 255:
         raise ValueError("Invalid customer user id")
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         account = conn.execute(
             """SELECT plan, credits_balance, created_at, updated_at
@@ -460,7 +458,7 @@ def get_customer_usage_alert(user_id: str) -> dict:
     user_id = user_id.strip()
     if not user_id or len(user_id) > 255:
         raise ValueError("Invalid customer user id")
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         row = conn.execute(
             """SELECT plan, credits_balance
@@ -511,7 +509,7 @@ def get_customer_usage_alert(user_id: str) -> dict:
 
 def create_monitor(api_key: str, url: str, interval_minutes: int, webhook_url: str) -> dict:
     now = datetime.now(timezone.utc); monitor_id = str(uuid.uuid4()); owner = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         conn.execute("INSERT INTO monitors (id, owner_key_hash, url, interval_minutes, webhook_url, created_at) VALUES (%s, %s, %s, %s, %s, %s)", (monitor_id, owner, url, interval_minutes, webhook_url, now)); conn.commit()
     return {"id": monitor_id, "url": url, "interval_minutes": interval_minutes, "webhook_url": webhook_url, "status": "active", "created_at": now.isoformat()}
@@ -521,7 +519,7 @@ def create_monitor_with_credit(api_key: str, url: str, interval_minutes: int, we
     now = datetime.now(timezone.utc)
     monitor_id = str(uuid.uuid4())
     key_hash = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         row = conn.execute(
             """SELECT a.api_key_hash, a.credits_balance
@@ -561,7 +559,7 @@ def create_monitor_with_credit(api_key: str, url: str, interval_minutes: int, we
 
 def list_monitors(api_key: str) -> list[dict]:
     key_hash = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         rows = conn.execute(
             """SELECT m.id, m.url, m.interval_minutes, m.webhook_url, m.last_price, m.last_checked_at, m.created_at
@@ -589,7 +587,7 @@ def _history_rows(conn, monitor_id: str, limit: int):
     return conn.execute("SELECT price, currency, captured_at, source_url FROM price_history WHERE monitor_id = %s ORDER BY captured_at DESC, id DESC LIMIT %s", (monitor_id, limit)).fetchall()
 
 def get_price_history(api_key: str, monitor_id: str, limit: int = 100) -> dict:
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn); monitor = _owned_monitor(conn, api_key, monitor_id); rows = _history_rows(conn, monitor_id, limit)
     points = [{"price": r[0], "currency": r[1], "captured_at": r[2].isoformat(), "source_url": r[3]} for r in rows]
     numeric = [p["price"] for p in points if p["price"] is not None]; current = numeric[0] if numeric else monitor[2]; lowest = min(numeric) if numeric else None; highest = max(numeric) if numeric else None; first = numeric[-1] if numeric else None
@@ -597,7 +595,7 @@ def get_price_history(api_key: str, monitor_id: str, limit: int = 100) -> dict:
     return {"monitor": {"id": monitor[0], "url": monitor[1], "last_price": monitor[2], "last_checked_at": monitor[3].isoformat() if monitor[3] else None}, "summary": {"points": len(points), "current_price": current, "lowest_price": lowest, "highest_price": highest, "change_percent": change_percent}, "history": points}
 
 def get_price_opportunity(api_key: str, monitor_id: str, limit: int = 100) -> dict:
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn); monitor = _owned_monitor(conn, api_key, monitor_id); rows = _history_rows(conn, monitor_id, limit)
     prices = [r[0] for r in rows if r[0] is not None]; current = prices[0] if prices else monitor[2]; lowest = min(prices) if prices else None; highest = max(prices) if prices else None; baseline = sum(prices) / len(prices) if prices else None
     discount_vs_high = round(((highest-current)/highest)*100, 2) if highest and current is not None else None; discount_vs_average = round(((baseline-current)/baseline)*100, 2) if baseline and current is not None else None
@@ -613,7 +611,7 @@ def save_research_run(api_key: str, item: dict, analysis: dict) -> dict:
     now = datetime.now(timezone.utc)
     comments = [x.strip() for x in item.get("comments", []) if isinstance(x, str) and x.strip()]
     owner = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         conn.execute(
             """INSERT INTO research_runs
@@ -693,7 +691,7 @@ def save_research_run(api_key: str, item: dict, analysis: dict) -> dict:
 def list_research_runs(api_key: str, url: str | None = None, limit: int = 20) -> list[dict]:
     owner = _account_hash(api_key)
     limit = max(1, min(limit, 100))
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         if url:
             runs = conn.execute(
@@ -777,7 +775,7 @@ def list_research_runs(api_key: str, url: str | None = None, limit: int = 20) ->
 
 def get_research_opportunity(api_key: str, run_id: str) -> dict:
     owner = _account_hash(api_key)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         run = conn.execute(
             """SELECT id, url, source_type, market, locale, title, comments_count, created_at
@@ -851,7 +849,7 @@ async def _deliver_pending_webhooks() -> int:
         while True:
             claim_token = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
-            with psycopg.connect(_db_url()) as conn:
+            with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
                 _init(conn)
                 row = conn.execute(
                     """SELECT d.event_id, d.monitor_id, d.payload, m.webhook_url, d.attempts
@@ -879,7 +877,7 @@ async def _deliver_pending_webhooks() -> int:
             try:
                 await validate_public_url(webhook_url)
                 event = json.loads(payload_text)
-                with psycopg.connect(_db_url()) as conn:
+                with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
                     _init(conn)
                     lease_owned = conn.execute(
                         """SELECT 1
@@ -898,7 +896,7 @@ async def _deliver_pending_webhooks() -> int:
                 ) as response:
                     response.raise_for_status()
                     await read_response_bytes(response, MAX_WEBHOOK_RESPONSE_BYTES)
-                with psycopg.connect(_db_url()) as conn:
+                with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
                     cursor = conn.execute(
                         """UPDATE webhook_deliveries
                         SET status='delivered', delivered_at=%s, locked_until=NULL,
@@ -913,7 +911,7 @@ async def _deliver_pending_webhooks() -> int:
             except Exception as exc:
                 attempts += 1
                 delay = min(3600, 60 * (2 ** min(attempts - 1, 6)))
-                with psycopg.connect(_db_url()) as conn:
+                with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
                     conn.execute(
                         """UPDATE webhook_deliveries
                         SET attempts=%s, next_attempt_at=%s, locked_until=NULL,
@@ -934,7 +932,7 @@ async def _deliver_pending_webhooks() -> int:
 async def run_due_monitors() -> dict:
     from app.services.product_parser import fetch_product
     now = datetime.now(timezone.utc)
-    with psycopg.connect(_db_url()) as conn:
+    with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
         _init(conn)
         rows = conn.execute(
             """SELECT id, url, interval_minutes, webhook_url, last_price, last_checked_at
@@ -947,7 +945,7 @@ async def run_due_monitors() -> dict:
     for monitor_id, url, interval, webhook_url, old_price, last_checked_at in rows:
         lease_token = str(uuid.uuid4())
         try:
-            with psycopg.connect(_db_url()) as lease_conn:
+            with psycopg.connect(_db_url(), **connect_kwargs()) as lease_conn:
                 lease_row = lease_conn.execute(
                     """INSERT INTO monitor_run_leases (monitor_id, lease_token, locked_until)
                     VALUES (%s, %s, CURRENT_TIMESTAMP + INTERVAL '10 minutes')
@@ -970,7 +968,7 @@ async def run_due_monitors() -> dict:
             source = data.get("source", {})
             source_url = source.get("url") or url
 
-            with psycopg.connect(_db_url()) as conn:
+            with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
                 _init(conn)
                 lease_owned = conn.execute(
                     """UPDATE monitor_run_leases
@@ -1019,7 +1017,7 @@ async def run_due_monitors() -> dict:
             failed += 1
         finally:
             try:
-                with psycopg.connect(_db_url()) as lease_conn:
+                with psycopg.connect(_db_url(), **connect_kwargs()) as lease_conn:
                     lease_conn.execute(
                         "DELETE FROM monitor_run_leases WHERE monitor_id = %s AND lease_token = %s",
                         (monitor_id, lease_token),

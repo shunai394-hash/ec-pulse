@@ -4,6 +4,7 @@ import os
 import secrets
 import httpx
 import psycopg
+from app.services.db import connect_kwargs
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
@@ -182,15 +183,26 @@ def root():
 @app.get("/health")
 def health():
     # Verify the database dependency so a broken deployment is not reported as healthy.
+    # The response explains *why* the database is unavailable (error class and
+    # connection shape) without exposing host, user or password.
+    from app.services.db import classify_db_error, describe_db_url
+    commit = os.getenv("VERCEL_GIT_COMMIT_SHA")
     try:
         from app.services.monitor_store import _db_url
-        with psycopg.connect(_db_url(), connect_timeout=3) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs(), connect_timeout=3) as conn:
             conn.execute("SELECT 1")
-        return {"status": "ok", "database": "ok"}
+        return {"status": "ok", "database": "ok", "commit": commit}
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail={"status": "degraded", "database": "unavailable", "error": type(exc).__name__},
+            detail={
+                "status": "degraded",
+                "database": "unavailable",
+                "error": type(exc).__name__,
+                "reason": classify_db_error(exc),
+                "connection": describe_db_url(),
+                "commit": commit,
+            },
         ) from exc
 
 @app.get("/billing", include_in_schema=False)
@@ -210,7 +222,7 @@ async def billing_success(request: Request, session_id: str | None = Query(defau
         raise HTTPException(status_code=401, detail="Authenticated user id is missing")
     try:
         from app.services.monitor_store import _init, _db_url
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             _init(conn)
             row = conn.execute(
                 """SELECT plan, credits_balance, subscription_status,
@@ -324,7 +336,7 @@ async def customer_account(http_request: Request):
         raise HTTPException(status_code=401, detail="Authenticated user id is missing")
     try:
         from app.services.monitor_store import _init, _db_url
-        with psycopg.connect(_db_url()) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs()) as conn:
             _init(conn)
             row = conn.execute(
                 "SELECT plan, credits_balance FROM api_accounts WHERE customer_user_id = %s",
@@ -619,12 +631,12 @@ def account(request: Request, response: Response, api_key: str = Depends(get_api
 
 @app.get("/api/cron/patrol/latest")
 async def patrol_latest(authorization: str | None = Header(default=None), limit: int = Query(default=10, ge=1, le=50)):
-    secret = os.getenv("CRON_SECRET")
+    secret = (os.getenv("CRON_SECRET") or "").strip()
     if not secret or not authorization or not secrets.compare_digest(authorization, f"Bearer {secret}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         from app.services.monitor_store import _db_url
-        with psycopg.connect(_db_url(), connect_timeout=3) as conn:
+        with psycopg.connect(_db_url(), **connect_kwargs(), connect_timeout=3) as conn:
             rows = conn.execute(
                 "SELECT id, checked_at, ok, report FROM patrol_reports ORDER BY checked_at DESC LIMIT %s",
                 (limit,),
@@ -641,7 +653,7 @@ async def patrol_latest(authorization: str | None = Header(default=None), limit:
 
 @app.get("/api/cron/patrol")
 async def patrol(authorization: str | None = Header(default=None)):
-    secret = os.getenv("CRON_SECRET")
+    secret = (os.getenv("CRON_SECRET") or "").strip()
     if not secret or not authorization or not secrets.compare_digest(authorization, f"Bearer {secret}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
     report = await run_patrol()
@@ -649,7 +661,7 @@ async def patrol(authorization: str | None = Header(default=None)):
 
 @app.get("/api/cron/check-monitors")
 async def check_monitors(authorization:str|None=Header(default=None)):
-    secret=os.getenv("CRON_SECRET")
+    secret=(os.getenv("CRON_SECRET") or "").strip()
     if not secret or not authorization or not secrets.compare_digest(authorization, f"Bearer {secret}"): raise HTTPException(status_code=401,detail="Unauthorized")
     try: return {"ok":True,"checked_at":datetime.now(timezone.utc).isoformat(),**await run_due_monitors()}
     except RuntimeError as exc: raise HTTPException(status_code=503,detail=str(exc)) from exc
